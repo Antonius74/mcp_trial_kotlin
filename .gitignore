@@ -1,0 +1,18 @@
+# Gradle / Kotlin
+.gradle/
+build/
+out/
+*.class
+
+# Local virtual envs (legacy)
+.venv/
+venv/
+
+# Environment files
+.env
+
+# OS
+.DS_Store
+
+# Logs
+*.log
