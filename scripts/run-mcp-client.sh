@@ -7,4 +7,4 @@ source "$SCRIPT_DIR/_common.sh"
 
 ensure_jar
 cd "$ROOT_DIR"
-exec java -jar "$JAR_PATH" mcp-client "$@"
+exec "$JAVA_BIN" -jar "$JAR_PATH" mcp-client "$@"

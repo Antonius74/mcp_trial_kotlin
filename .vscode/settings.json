@@ -1,0 +1,7 @@
+{
+  "files.associations": {
+    "*.kt": "kotlin",
+    "*.kts": "kotlin"
+  },
+  "editor.semanticHighlighting.enabled": true
+}

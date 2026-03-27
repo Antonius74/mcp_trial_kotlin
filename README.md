@@ -1,72 +1,91 @@
-# Mock REST API + MCP Server/Client + Ollama (Kotlin)
+# Mock REST API + MCP Server/Client + Ollama (Guida Didattica)
 
-Questa repository ora usa **Kotlin (JVM)** per tutti i servizi applicativi:
+Questa repository mostra una pipeline completa in cui un LLM (via Ollama) puo parlare con una REST API usando MCP.
 
-- REST API (prima FastAPI)
-- bootstrap database (prima script Python)
-- MCP server stdio (prima `mcp_server/server.py`)
-- MCP client con Ollama (prima `mcp_client/client.py`)
+Obiettivo pratico:
 
-Il **database rimane invariato**: stesso engine PostgreSQL, stesso schema, stesse query SQL principali, stesso seed idempotente.
+- avere una REST API mock con dati reali su PostgreSQL;
+- esporre le operazioni API come tool MCP;
+- usare un MCP client che passa i tool a Ollama e lascia al modello decidere quando chiamarli.
 
-## 1) Architettura
+In questo modo il modello non inventa i dati: li legge/scrive realmente sul DB tramite tool.
+
+## 1) Architettura generale
 
 Componenti:
 
-- `REST API` (Ktor): espone endpoint HTTP (`/customers`, `/orders`) e usa PostgreSQL.
-- `PostgreSQL`: persistenza reale.
+- `REST API` (`Ktor`): espone endpoint HTTP (`/customers`, `/orders`) e usa PostgreSQL.
+- `PostgreSQL`: persistenza reale dei dati.
 - `MCP Server` (stdio + JSON-RPC): traduce chiamate tool MCP in chiamate HTTP alla REST API.
 - `MCP Client`: orchestration layer tra Ollama e MCP Server.
 - `Ollama`: LLM che riceve lista tool e decide quando invocarli.
 
-Flusso:
+Flusso ad alto livello:
 
-1. L'utente invia un prompt al client MCP.
-2. Il client inizializza una sessione col server MCP (stdio).
-3. Il client legge i tool disponibili (`tools/list`).
+1. L'utente scrive un prompt al MCP client.
+2. Il client inizializza sessione MCP col server (stdio).
+3. Il client prende i tool disponibili (`tools/list`).
 4. Il client invia prompt + schema tool a Ollama (`/api/chat`).
-5. Ollama puo restituire `tool_calls`.
-6. Il client esegue i tool via MCP (`tools/call`).
-7. Il server MCP invoca la REST API.
+5. Ollama puo rispondere con `tool_calls`.
+6. Il client esegue ogni tool chiamando MCP (`tools/call`).
+7. Il MCP server chiama la REST API.
 8. La REST API legge/scrive su PostgreSQL.
-9. Il risultato torna al modello per la risposta finale in linguaggio naturale.
+9. Il risultato torna indietro fino a Ollama, che produce la risposta finale in linguaggio naturale.
 
 ## 2) Struttura progetto
 
 ```text
 .
-├── build.gradle.kts
-├── settings.gradle.kts
-├── scripts/
-│   ├── bootstrap-db.sh
-│   ├── run-api.sh
-│   ├── run-mcp-client.sh
-│   └── run-mcp-server.sh
 ├── src/main/kotlin/com/miscsvc/
 │   ├── Main.kt
 │   ├── api/
+│   │   ├── ApiRepository.kt
+│   │   ├── ApiServer.kt
+│   │   ├── Models.kt
+│   │   └── Validation.kt
 │   ├── config/
+│   │   ├── AppSettings.kt
+│   │   └── EnvLoader.kt
 │   ├── db/
+│   │   ├── DatabaseConnections.kt
+│   │   └── DbBootstrap.kt
 │   ├── json/
+│   │   └── JsonSupport.kt
 │   └── mcp/
+│       ├── client/
+│       │   ├── McpClientApp.kt
+│       │   └── McpStdIOClient.kt
+│       ├── protocol/
+│       │   └── StdioJsonRpc.kt
+│       └── server/
+│           └── McpServer.kt
+├── scripts/
+│   ├── _common.sh
+│   ├── bootstrap-db.sh
+│   ├── run-api.sh
+│   ├── run-mcp-server.sh
+│   └── run-mcp-client.sh
+├── build.gradle.kts
+├── settings.gradle.kts
 ├── .env.example
 └── README.md
 ```
 
 ## 3) Prerequisiti
 
-- JDK 21+
+- Java 21+
 - Gradle 8+
-- PostgreSQL (container o install locale)
-  - host: `127.0.0.1`
+- PostgreSQL in Docker (gia disponibile nel tuo setup)
+  - host: `localhost`
   - port: `5432`
   - user: `postgres`
   - password: `postgres`
-- Ollama in esecuzione su `http://127.0.0.1:11434`
+- pgAdmin opzionale: `http://localhost:5050`
+- Ollama in esecuzione su: `http://127.0.0.1:11434`
 
 ## 4) Configurazione
 
-Copia il file env:
+Copia file env:
 
 ```bash
 cp .env.example .env
@@ -88,21 +107,26 @@ Valori principali:
 - `MCP_SERVER_COMMAND=./scripts/run-mcp-server.sh`
 - `MCP_SERVER_ARGS=`
 
-## 5) Build
+Nota importante:
 
-Per creare il jar eseguibile (fat jar):
+- Il client avvia il server MCP come processo figlio via stdio.
+- `MCP_SERVER_COMMAND` deve puntare a un comando valido nell'ambiente corrente.
+- `API_BASE_URL` deve puntare esattamente alla stessa porta dove gira la REST API.
+
+## 5) Setup rapido
 
 ```bash
+cd /Users/antoniolatela/Documents/mcp_trial_kotlin
+cp .env.example .env
 gradle -q fatJar
 ```
 
-Output atteso:
+Nota:
 
-- `build/libs/mcp-trial-kotlin-all.jar`
+- se il jar non esiste, gli script `./scripts/*.sh` lo costruiscono automaticamente;
+- se usi `./gradlew`, sostituisci `gradle` con `./gradlew`.
 
-Gli script in `scripts/` costruiscono il jar automaticamente se non presente.
-
-## 6) Bootstrap DB (schema invariato)
+## 6) Bootstrap database (crea DB/tabelle/seed)
 
 Comando:
 
@@ -110,11 +134,22 @@ Comando:
 ./scripts/bootstrap-db.sh
 ```
 
-Cosa fa:
+Cosa fa `src/main/kotlin/com/miscsvc/db/DbBootstrap.kt`:
 
-1. crea `misc_svc` se assente;
-2. crea tabelle `customers` e `orders` se assenti;
-3. inserisce seed idempotente (2 customer + 2 order).
+1. si connette al DB admin (`postgres`);
+2. verifica se esiste `misc_svc`;
+3. se manca, lo crea;
+4. si connette a `misc_svc`;
+5. crea tabelle:
+   - `customers(id, name, email, created_at)`
+   - `orders(id, customer_id, item, amount, status, created_at)`
+6. inserisce seed idempotente:
+   - 2 clienti iniziali
+   - 2 ordini iniziali
+
+Idempotenza:
+
+- puoi rilanciare il bootstrap senza duplicare i record seed principali.
 
 ## 7) Avvio servizi
 
@@ -124,7 +159,7 @@ Cosa fa:
 ./scripts/run-api.sh
 ```
 
-Endpoint:
+Endpoint utili:
 
 - `GET /health`
 - `GET /customers`
@@ -134,11 +169,16 @@ Endpoint:
 
 ### 7.2 Avvia MCP server (opzionale manuale)
 
+Il client lo avvia automaticamente. Se vuoi provarlo separatamente:
+
 ```bash
 ./scripts/run-mcp-server.sh
 ```
 
-Il client in genere lo avvia automaticamente come processo figlio.
+Importante:
+
+- il server MCP su stdio non stampa banner HTTP e puo sembrare "fermo": e normale;
+- resta in attesa su stdin/stdout finche non lo usa un client MCP.
 
 ### 7.3 Avvia MCP client con Ollama
 
@@ -154,31 +194,459 @@ Modalita interattiva:
 ./scripts/run-mcp-client.sh
 ```
 
-## 8) Contratto DB conservato
+### 7.4 Preflight check (consigliato)
 
-Schema SQL mantenuto:
-
-- `customers(id, name, email, created_at)`
-- `orders(id, customer_id, item, amount, status, created_at)`
-
-Vincoli mantenuti:
-
-- `customers.email` univoca
-- FK `orders.customer_id -> customers.id` con `ON DELETE CASCADE`
-- check `orders.amount >= 0`
-
-Semantica errori mantenuta:
-
-- email duplicata -> `409 Conflict`
-- customer non trovato in creazione ordine -> `404 Not Found`
-
-## 9) Entry point alternativi
-
-Senza script:
+Prima di lanciare il client, verifica che la API mock risponda davvero sull'URL configurato:
 
 ```bash
-java -jar build/libs/mcp-trial-kotlin-all.jar api
-java -jar build/libs/mcp-trial-kotlin-all.jar bootstrap-db
-java -jar build/libs/mcp-trial-kotlin-all.jar mcp-server
-java -jar build/libs/mcp-trial-kotlin-all.jar mcp-client "Mostrami ordini"
+echo "$API_BASE_URL"
+curl -i "$API_BASE_URL/health"
+curl -i "$API_BASE_URL/customers"
 ```
+
+Devi vedere:
+
+- `200 OK` su `/health`
+- body `{"status":"ok"}`.
+
+Se vedi `404 Not Found`, quasi sempre stai colpendo un altro servizio sulla stessa porta.
+In quel caso usa una porta diversa (es. `8010`) e allinea sia API che `API_BASE_URL`:
+
+```bash
+export API_PORT=8010
+export API_BASE_URL=http://127.0.0.1:8010
+./scripts/run-api.sh
+```
+
+In un secondo terminale:
+
+```bash
+export API_BASE_URL=http://127.0.0.1:8010
+./scripts/run-mcp-client.sh "Mostrami clienti e ordini"
+```
+
+## 8) Come funziona il colloquio MCP client-server-API (dettaglio)
+
+Diagramma sequenziale:
+
+```mermaid
+sequenceDiagram
+    participant U as Utente
+    participant C as MCP Client
+    participant M as Ollama
+    participant S as MCP Server
+    participant A as REST API
+    participant D as PostgreSQL
+
+    U->>C: Prompt naturale
+    C->>S: initialize
+    S-->>C: capabilities + serverInfo
+    C->>S: tools/list
+    S-->>C: lista tool
+    C->>M: /api/chat (messages + tools)
+    M-->>C: tool_calls
+    C->>S: tools/call
+    S->>A: HTTP API call
+    A->>D: SELECT/INSERT
+    D-->>A: dati
+    A-->>S: JSON
+    S-->>C: tool result (content.text)
+    C->>M: /api/chat (tool result)
+    M-->>C: risposta finale
+    C-->>U: output testuale
+```
+
+### Passo A: inizializzazione MCP
+
+`src/main/kotlin/com/miscsvc/mcp/client/McpStdIOClient.kt` apre un processo figlio:
+
+- comando: `./scripts/run-mcp-server.sh`
+- transport: stdio
+- protocollo: JSON-RPC con frame `Content-Length`.
+
+Il client invia:
+
+- metodo: `initialize`
+- versione protocollo: `2024-11-05`
+
+Il server risponde con:
+
+- `capabilities.tools`
+- `serverInfo`.
+
+### Passo B: discovery dei tool
+
+Il client chiama `tools/list`.
+
+Il server restituisce i tool con schema JSON:
+
+- `health_check`
+- `list_customers`
+- `create_customer`
+- `list_orders`
+- `create_order`
+
+### Passo C: tool schema -> Ollama
+
+Il client converte i tool MCP in formato function-calling atteso da Ollama e invia:
+
+- `messages` (system + user)
+- `tools` (funzioni disponibili)
+- endpoint: `POST /api/chat`
+
+### Passo D: decisione LLM
+
+Ollama puo rispondere con:
+
+- testo finale diretto, oppure
+- `tool_calls` da eseguire.
+
+### Passo E: esecuzione tool
+
+Per ogni tool call:
+
+1. il client chiama MCP `tools/call`;
+2. il server individua l'handler del tool;
+3. l'handler fa una chiamata HTTP alla REST API;
+4. la REST API opera su PostgreSQL;
+5. il risultato torna al client come `content[type=text]`.
+
+### Passo F: risposta finale
+
+Il client aggiunge il risultato tool ai `messages` con ruolo `tool` e richiama Ollama.
+
+- Se ci sono altri tool_calls, il ciclo continua.
+- Se non ci sono tool_calls, il testo assistant viene stampato come output finale.
+
+### Esempio reale di messaggi (semplificato)
+
+`initialize` (client -> server):
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {
+    "protocolVersion": "2024-11-05",
+    "capabilities": {},
+    "clientInfo": {"name": "ollama-mcp-client-kotlin", "version": "1.0.0"}
+  }
+}
+```
+
+`tools/list` response (server -> client, estratto):
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "tools": [
+      {"name": "list_customers", "inputSchema": {"type": "object", "properties": {}}},
+      {"name": "create_order", "inputSchema": {"type": "object", "properties": {"customer_id": {"type": "integer"}}}}
+    ]
+  }
+}
+```
+
+Chiamata a Ollama con tool disponibili (client -> `POST /api/chat`):
+
+```json
+{
+  "model": "gpt-oss:120b-cloud",
+  "messages": [
+    {"role": "system", "content": "Sei un assistente..."},
+    {"role": "user", "content": "Mostrami i clienti"}
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "list_customers",
+        "parameters": {"type": "object", "properties": {}}
+      }
+    }
+  ],
+  "stream": false
+}
+```
+
+Risposta con `tool_calls` (Ollama -> client, estratto):
+
+```json
+{
+  "message": {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+      {"id": "call_1", "function": {"name": "list_customers", "arguments": {}}}
+    ]
+  }
+}
+```
+
+`tools/call` (client -> server):
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {"name": "list_customers", "arguments": {}}
+}
+```
+
+`tools/call` response (server -> client, estratto):
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"ok\": true, \"status_code\": 200, \"data\": [...]}"
+      }
+    ]
+  }
+}
+```
+
+## 9) Approfondimento codice file-per-file
+
+### `src/main/kotlin/com/miscsvc/config/AppSettings.kt`
+
+Responsabilita:
+
+- caricare `.env`;
+- centralizzare configurazioni DB/API/MCP/Ollama.
+
+Punti chiave:
+
+- fallback robusti per sviluppo locale;
+- parsing argomenti comando MCP server;
+- un solo punto di verita per host/porte/credenziali.
+
+### `src/main/kotlin/com/miscsvc/config/EnvLoader.kt`
+
+Responsabilita:
+
+- parse minimale del file `.env`.
+
+Scelte:
+
+- supporto a commenti e righe vuote;
+- parsing key/value semplice e prevedibile.
+
+### `src/main/kotlin/com/miscsvc/db/DatabaseConnections.kt`
+
+Responsabilita:
+
+- creare connessioni PostgreSQL (admin e applicative).
+
+Scelte:
+
+- JDBC diretto con driver PostgreSQL;
+- URL separata per DB admin e DB applicativo.
+
+### `src/main/kotlin/com/miscsvc/db/DbBootstrap.kt`
+
+Responsabilita:
+
+- provisioning DB e schema iniziale.
+
+Funzioni chiave:
+
+- `createDatabaseIfMissing()`: crea DB se non esiste;
+- `createTablesAndSeed()`: crea tabelle + seed;
+- `bootstrapDatabase()`: orchestration finale.
+
+Dettagli importanti:
+
+- quote sicuro dell'identificatore DB;
+- vincoli DB: `UNIQUE(email)`, FK su `orders.customer_id`, check su `amount >= 0`.
+
+### `src/main/kotlin/com/miscsvc/api/Models.kt`
+
+Responsabilita:
+
+- definire payload request/response e eccezioni dominio.
+
+Esempi:
+
+- `CustomerCreate(name, email)`
+- `OrderCreate(customerId, item, amount, status)`
+
+### `src/main/kotlin/com/miscsvc/api/Validation.kt`
+
+Responsabilita:
+
+- validazione applicativa dei payload in ingresso.
+
+Vantaggio:
+
+- input invalidi bloccati prima di toccare il DB.
+
+### `src/main/kotlin/com/miscsvc/api/ApiRepository.kt`
+
+Responsabilita:
+
+- mapping SQL <-> modelli Kotlin.
+
+Comportamenti:
+
+- `createCustomer`: intercetta `UNIQUE` -> eccezione dominio;
+- `createOrder`: intercetta FK invalid -> eccezione dominio.
+
+### `src/main/kotlin/com/miscsvc/api/ApiServer.kt`
+
+Responsabilita:
+
+- endpoint REST e mapping errori HTTP.
+
+Comportamenti:
+
+- bootstrap all'avvio;
+- `POST /customers`: duplicate email -> HTTP `409`;
+- `POST /orders`: FK invalid -> HTTP `404`.
+
+### `src/main/kotlin/com/miscsvc/mcp/protocol/StdioJsonRpc.kt`
+
+Responsabilita:
+
+- framing stdio per protocollo JSON-RPC MCP.
+
+Blocchi principali:
+
+- lettura header/body con `Content-Length`;
+- serializzazione e scrittura messaggi JSON-RPC.
+
+### `src/main/kotlin/com/miscsvc/mcp/server/McpServer.kt`
+
+Responsabilita:
+
+- implementare server MCP minimale su stdio.
+
+Blocchi principali:
+
+1. dispatch metodi MCP
+   - `initialize`
+   - `tools/list`
+   - `tools/call`
+   - `ping`
+2. registry tool
+   - definizione schema input e handler.
+3. bridge HTTP
+   - `callApi()` invia request alla REST API e normalizza output (`ok`, `status_code`, `data|error`).
+
+### `src/main/kotlin/com/miscsvc/mcp/client/McpStdIOClient.kt`
+
+Responsabilita:
+
+- avviare server MCP come subprocess;
+- gestire request/notify JSON-RPC.
+
+Espone:
+
+- `initialize()`
+- `listTools()`
+- `callTool()`
+
+### `src/main/kotlin/com/miscsvc/mcp/client/McpClientApp.kt`
+
+Responsabilita:
+
+- orchestrare il ciclo LLM <-> MCP tools.
+
+Sezioni importanti:
+
+1. conversione tool
+   - schema MCP -> function-calling Ollama.
+2. loop tool-calling
+   - invia prompt a Ollama;
+   - esegue eventuali `tool_calls`;
+   - re-invia risultati tool a Ollama;
+   - termina quando arriva risposta testuale finale.
+3. CLI
+   - one-shot (`./scripts/run-mcp-client.sh "..."`)
+   - interattiva (`./scripts/run-mcp-client.sh`).
+
+### `src/main/kotlin/com/miscsvc/Main.kt`
+
+Responsabilita:
+
+- entrypoint unico con subcomandi:
+  - `bootstrap-db`
+  - `api`
+  - `mcp-server`
+  - `mcp-client`
+
+## 10) Esempi API diretti (senza MCP)
+
+Creazione customer:
+
+```bash
+curl -X POST http://127.0.0.1:8000/customers \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Giulia Verdi","email":"giulia.verdi@example.com"}'
+```
+
+Creazione order:
+
+```bash
+curl -X POST http://127.0.0.1:8000/orders \
+  -H "Content-Type: application/json" \
+  -d '{"customer_id":1,"item":"Tastiera","amount":79.90,"status":"new"}'
+```
+
+## 11) Troubleshooting
+
+`connection refused` su PostgreSQL:
+
+- verifica container PostgreSQL attivo su `localhost:5432`;
+- verifica credenziali in `.env`.
+
+`address already in use` su API:
+
+- porta `8000` occupata, cambia `API_PORT` o ferma il processo in conflitto.
+
+Il client risponde con `404 Not Found`:
+
+- `API_BASE_URL` punta a un servizio sbagliato (tipico: altra app su `:8000`);
+- verifica con `curl "$API_BASE_URL/health"`;
+- sposta API e client su `8010` (vedi sezione 7.4) e riprova.
+
+Errore MCP su avvio server:
+
+- controlla `MCP_SERVER_COMMAND` in `.env`;
+- in questo progetto il default consigliato e `./scripts/run-mcp-server.sh`.
+
+Sembra che `./scripts/run-mcp-server.sh` "non parta":
+
+- e atteso: server MCP su stdio non mostra output web/HTTP;
+- lascia il processo in esecuzione o usa direttamente `run-mcp-client.sh`, che lo avvia da solo.
+
+Ollama non risponde:
+
+- verifica `ollama serve` attivo;
+- verifica modello disponibile (`OLLAMA_MODEL`, esempio `gpt-oss:120b-cloud`).
+
+## 12) Perche questa architettura e utile
+
+- separa chiaramente i ruoli:
+  - API = business/data layer
+  - MCP server = tool exposure layer
+  - client + Ollama = reasoning + decisione tool
+- rende testabile ogni livello separatamente;
+- evita che il modello acceda direttamente al DB;
+- facilita estensione futura: basta aggiungere endpoint + tool.
+
+## 13) Possibili estensioni
+
+- aggiungere auth alla REST API;
+- aggiungere logging strutturato e tracing tool-calls;
+- aggiungere test automatici (unit + integration);
+- aggiungere nuovi tool (update/delete, filtri, paginazione);
+- supportare transport MCP alternativo (es. streamable HTTP).
